@@ -128,9 +128,10 @@ impl Builder {
                 }
             }
             if let Some(graceful_stop_token) = &graceful_stop_token
-                && graceful_stop_token.is_cancelled() {
-                    break;
-                }
+                && graceful_stop_token.is_cancelled()
+            {
+                break;
+            }
         }
         Ok(())
     }
@@ -197,12 +198,13 @@ async fn process_web_transport(
     let (mut parts, mut body) = response.into_parts();
     // automatically set Content-Length from body
     if let Some(size) = { body.size() }
-        && !parts.headers.contains_key(http::header::CONTENT_LENGTH) {
-            parts.headers.insert(
-                http::header::CONTENT_LENGTH,
-                http::header::HeaderValue::from(size),
-            );
-        }
+        && !parts.headers.contains_key(http::header::CONTENT_LENGTH)
+    {
+        parts.headers.insert(
+            http::header::CONTENT_LENGTH,
+            http::header::HeaderValue::from(size),
+        );
+    }
 
     let empty_res = http::Response::from_parts(parts, ());
     match stream.send_response(empty_res).await {
@@ -267,12 +269,13 @@ where
     let (mut parts, mut body) = response.into_parts();
     // automatically set Content-Length from body
     if let Some(size) = { body.size() }
-        && !parts.headers.contains_key(http::header::CONTENT_LENGTH) {
-            parts.headers.insert(
-                http::header::CONTENT_LENGTH,
-                http::header::HeaderValue::from(size),
-            );
-        }
+        && !parts.headers.contains_key(http::header::CONTENT_LENGTH)
+    {
+        parts.headers.insert(
+            http::header::CONTENT_LENGTH,
+            http::header::HeaderValue::from(size),
+        );
+    }
 
     let empty_res = http::Response::from_parts(parts, ());
     match tx.send_response(empty_res).await {
