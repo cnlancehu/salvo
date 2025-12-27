@@ -173,7 +173,7 @@ async fn process_web_transport(
             .remove::<Arc<Mutex<salvo_http3::server::Connection<salvo_http3::quinn::Connection, Bytes>>>>()
             .map(|c| {
                 Arc::into_inner(c).expect("http3 connection must exist").into_inner()
-                    .map_err(|e| IoError::other( format!("failed to get conn : {e}")))
+                    .map_err(|e| IoError::other(format!("failed to get conn : {e}")))
             })
             .transpose()?;
         stream =
@@ -195,7 +195,17 @@ async fn process_web_transport(
         return Ok(Some(conn));
     };
 
-    let (parts, mut body) = response.into_parts();
+    let (mut parts, mut body) = response.into_parts();
+    // automatically set Content-Length from body
+    if let Some(size) = { body.size() } {
+        if !parts.headers.contains_key(http::header::CONTENT_LENGTH) {
+            parts.headers.insert(
+                http::header::CONTENT_LENGTH,
+                http::header::HeaderValue::from(size),
+            );
+        }
+    }
+
     let empty_res = http::Response::from_parts(parts, ());
     match stream.send_response(empty_res).await {
         Ok(_) => {
@@ -256,7 +266,17 @@ where
         .await
         .map_err(|e| IoError::other(format!("failed to call hyper service : {e}")))?;
 
-    let (parts, mut body) = response.into_parts();
+    let (mut parts, mut body) = response.into_parts();
+    // automatically set Content-Length from body
+    if let Some(size) = { body.size() } {
+        if !parts.headers.contains_key(http::header::CONTENT_LENGTH) {
+            parts.headers.insert(
+                http::header::CONTENT_LENGTH,
+                http::header::HeaderValue::from(size),
+            );
+        }
+    }
+
     let empty_res = http::Response::from_parts(parts, ());
     match tx.send_response(empty_res).await {
         Ok(_) => {
