@@ -68,6 +68,44 @@ pub trait Filter: Debug + Send + Sync + 'static {
     fn info(&self) -> FilterInfo {
         FilterInfo::Other(self.type_name())
     }
+
+    /// Returns an exact static path segment that must match before this filter
+    /// can succeed, when one is available.
+    ///
+    /// This is an internal optimization hint. Implementations must return
+    /// `Some` only when a different current path segment guarantees that
+    /// [`Filter::filter`] returns `false` without observable side effects.
+    #[doc(hidden)]
+    #[inline]
+    fn static_path_segment(&self) -> Option<&str> {
+        None
+    }
+
+    /// Returns whether this filter can be evaluated synchronously.
+    ///
+    /// The default is `false`, preserving the behavior of existing custom
+    /// filters. Built-in filters override this so the router can avoid
+    /// allocating an async-trait future for purely synchronous matching.
+    /// Implementations returning `true` must keep that classification stable
+    /// for their lifetime and provide a non-blocking [`Filter::filter_sync`]
+    /// with identical results and side effects.
+    #[doc(hidden)]
+    #[inline]
+    fn is_sync(&self) -> bool {
+        false
+    }
+
+    /// Evaluates a synchronous filter without creating a future.
+    ///
+    /// Callers must check [`Filter::is_sync`] first. The default deliberately
+    /// panics so an asynchronous custom filter cannot accidentally be treated
+    /// as synchronous.
+    #[doc(hidden)]
+    #[inline]
+    fn filter_sync(&self, _req: &mut Request, _path: &mut PathState<'_>) -> bool {
+        panic!("filter_sync called for an asynchronous filter")
+    }
+
     /// Create a new filter use `And` filter.
     #[inline]
     fn and<F>(self, other: F) -> And<Self, F>
@@ -136,6 +174,16 @@ where
 {
     #[inline]
     async fn filter(&self, req: &mut Request, path: &mut PathState<'_>) -> bool {
+        self.filter_sync(req, path)
+    }
+
+    #[inline]
+    fn is_sync(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn filter_sync(&self, req: &mut Request, path: &mut PathState<'_>) -> bool {
         self.0(req, path)
     }
 }
@@ -233,6 +281,36 @@ pub fn delete() -> MethodFilter {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Copy, Debug)]
+    struct AsyncValue(bool);
+
+    #[async_trait]
+    impl Filter for AsyncValue {
+        async fn filter(&self, _req: &mut Request, _path: &mut PathState<'_>) -> bool {
+            self.0
+        }
+    }
+
+    /// A synchronous filter whose async entry point must never be used by a
+    /// composite filter. This makes an accidental boxed child call fail loudly.
+    #[derive(Clone, Copy, Debug)]
+    struct SyncOnlyValue(bool);
+
+    #[async_trait]
+    impl Filter for SyncOnlyValue {
+        async fn filter(&self, _req: &mut Request, _path: &mut PathState<'_>) -> bool {
+            panic!("synchronous child was evaluated through its async entry point")
+        }
+
+        fn is_sync(&self) -> bool {
+            true
+        }
+
+        fn filter_sync(&self, _req: &mut Request, _path: &mut PathState<'_>) -> bool {
+            self.0
+        }
+    }
+
     #[test]
     fn test_methods() {
         assert_eq!(get(), MethodFilter(Method::GET));
@@ -242,6 +320,67 @@ mod tests {
         assert_eq!(patch(), MethodFilter(Method::PATCH));
         assert_eq!(put(), MethodFilter(Method::PUT));
         assert_eq!(delete(), MethodFilter(Method::DELETE));
+        assert!(get().is_sync());
+    }
+
+    #[test]
+    fn built_in_filters_expose_the_sync_entry_point() {
+        fn always(_req: &mut Request, _path: &mut PathState<'_>) -> bool {
+            true
+        }
+
+        let filters: Vec<Box<dyn Filter>> = vec![
+            Box::new(path("users")),
+            Box::new(get()),
+            Box::new(scheme(Scheme::HTTP)),
+            Box::new(host("example.com")),
+            Box::new(port(80)),
+            Box::new(FnFilter(always)),
+        ];
+        assert!(filters.iter().all(|filter| filter.is_sync()));
+        assert_eq!(path("users").static_path_segment(), Some("users"));
+        assert_eq!(
+            path("users").and(get()).static_path_segment(),
+            Some("users")
+        );
+        assert!(
+            path("users")
+                .or(path("fallback"))
+                .static_path_segment()
+                .is_none()
+        );
+        assert!(
+            path("users")
+                .or_else(|_, _| true)
+                .static_path_segment()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_composites_prefer_sync_child_entry_points() {
+        let mut req = Request::default();
+        let mut path_state = PathState::from_borrowed_path("one");
+
+        let nested_sync = SyncOnlyValue(true).and(SyncOnlyValue(true));
+        assert!(nested_sync.is_sync());
+        assert!(nested_sync.filter_sync(&mut req, &mut path_state));
+
+        let mixed_and = nested_sync.and(AsyncValue(true));
+        assert!(!mixed_and.is_sync());
+        assert!(mixed_and.filter(&mut req, &mut path_state).await);
+
+        let mixed_or = AsyncValue(false).or(SyncOnlyValue(true));
+        assert!(!mixed_or.is_sync());
+        assert!(mixed_or.filter(&mut req, &mut path_state).await);
+
+        let sync_and_then = SyncOnlyValue(true).and_then(|_, _| true);
+        assert!(sync_and_then.is_sync());
+        assert!(sync_and_then.filter_sync(&mut req, &mut path_state));
+
+        let mixed_or_else = AsyncValue(false).or_else(|_, _| true);
+        assert!(!mixed_or_else.is_sync());
+        assert!(mixed_or_else.filter(&mut req, &mut path_state).await);
     }
 
     #[tokio::test]

@@ -1043,12 +1043,29 @@ impl Debug for PathFilter {
 #[async_trait]
 impl Filter for PathFilter {
     #[inline]
-    async fn filter(&self, _req: &mut Request, state: &mut PathState<'_>) -> bool {
+    async fn filter(&self, req: &mut Request, state: &mut PathState<'_>) -> bool {
+        self.filter_sync(req, state)
+    }
+    #[inline]
+    fn is_sync(&self) -> bool {
+        true
+    }
+    #[inline]
+    fn filter_sync(&self, _req: &mut Request, state: &mut PathState<'_>) -> bool {
         self.detect(state)
     }
     #[inline]
     fn info(&self) -> FilterInfo {
         FilterInfo::Path(self.raw_value.clone())
+    }
+    #[inline]
+    fn static_path_segment(&self) -> Option<&str> {
+        let segment = self.raw_value.trim_start_matches('/').split('/').next()?;
+        if segment.is_empty() || segment.contains(['{', '}']) {
+            None
+        } else {
+            Some(segment)
+        }
     }
 }
 impl PathFilter {

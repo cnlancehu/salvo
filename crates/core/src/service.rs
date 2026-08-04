@@ -8,6 +8,7 @@ use http::header::{ALT_SVC, CONTENT_TYPE};
 use http::uri::Scheme;
 use hyper::service::Service as HyperService;
 use hyper::{Method, Request as HyperRequest, Response as HyperResponse};
+use parking_lot::Mutex;
 
 use crate::catcher::{Catcher, write_error_default};
 use crate::conn::SocketAddr;
@@ -15,7 +16,7 @@ use crate::fuse::FuseConfig;
 use crate::handler::{Handler, WhenHoop};
 use crate::http::body::{ReqBody, ResBody};
 use crate::http::{Mime, Request, Response, StatusCode};
-use crate::routing::{FlowCtrl, PathState, Router};
+use crate::routing::{CompiledRouter, FlowCtrl, PathState, Router};
 use crate::{ConnCtrl, Depot, async_trait};
 
 /// Service http request.
@@ -23,6 +24,7 @@ use crate::{ConnCtrl, Depot, async_trait};
 pub struct Service {
     /// The router of this service.
     pub router: Arc<Router>,
+    compiled_router: Mutex<Option<Arc<CompiledRouter>>>,
     /// The catcher of this service.
     pub catcher: Option<Arc<Catcher>>,
     /// These hoops will always be called when request received.
@@ -49,8 +51,10 @@ impl Service {
     where
         T: Into<Arc<Router>>,
     {
+        let router = router.into();
         Self {
-            router: router.into(),
+            router,
+            compiled_router: Mutex::new(None),
             catcher: None,
             hoops: vec![],
             allowed_media_types: Arc::new(vec![]),
@@ -157,12 +161,28 @@ impl Service {
         conn_ctrl: ConnCtrl,
         alt_svc_h3: Option<HeaderValue>,
     ) -> HyperHandler {
+        // `router` remains public for compatibility. If older code replaces it
+        // directly, compile that replacement here instead of using a stale plan.
+        let mut cached = self.compiled_router.lock();
+        if cached.as_ref().is_none_or(|compiled| {
+            !std::ptr::eq(
+                Arc::as_ptr(&self.router),
+                compiled.router() as *const Router,
+            )
+        }) {
+            *cached = Some(Arc::new(CompiledRouter::new(self.router.clone())));
+        }
+        let compiled_router = cached
+            .as_ref()
+            .expect("compiled router cache was initialized")
+            .clone();
+        drop(cached);
         HyperHandler {
             local_addr,
             remote_addr,
             http_scheme,
             state: Arc::new(HyperHandlerState {
-                router: self.router.clone(),
+                router: compiled_router,
                 catcher: self.catcher.clone(),
                 hoops: self.hoops.clone(),
                 allowed_media_types: self.allowed_media_types.clone(),
@@ -223,7 +243,7 @@ static DEFAULT_STATUS_OK_HANDLER: LazyLock<Arc<dyn Handler>> =
 
 #[doc(hidden)]
 pub(crate) struct HyperHandlerState {
-    pub(crate) router: Arc<Router>,
+    pub(crate) router: Arc<CompiledRouter>,
     pub(crate) catcher: Option<Arc<Catcher>>,
     pub(crate) hoops: Vec<Arc<dyn Handler>>,
     pub(crate) allowed_media_types: Arc<Vec<Mime>>,
@@ -278,7 +298,16 @@ impl HyperHandler {
         async move {
             let path = req.uri().path().to_owned();
             let mut path_state = PathState::from_owned_path(path);
-            if let Some(dm) = state.router.detect(&mut req, &mut path_state).await {
+            let detected = if state.router.uses_indexed_dispatch() {
+                state.router.detect_indexed(&mut req, &mut path_state).await
+            } else {
+                state
+                    .router
+                    .router()
+                    .detect(&mut req, &mut path_state)
+                    .await
+            };
+            if let Some(dm) = detected {
                 path_state.params.seal();
                 req.params = path_state.params;
                 #[cfg(feature = "matched-path")]
@@ -462,6 +491,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::prelude::*;
     use crate::test::{ResponseExt, TestClient};
 
@@ -536,6 +567,58 @@ mod tests {
         assert_eq!(content, "before1before2");
         let content = access(&service, "3").await;
         assert_eq!(content, "before1before2before3");
+    }
+
+    #[tokio::test]
+    async fn router_can_still_be_mutated_before_service_starts() {
+        #[handler]
+        async fn added_later() -> &'static str {
+            "added"
+        }
+
+        let mut service = Service::new(Router::new());
+        Arc::get_mut(&mut service.router)
+            .expect("Service must not clone its router before startup")
+            .routers
+            .push(Router::with_path("later").goal(added_later));
+
+        let content = TestClient::get("http://127.0.0.1/later")
+            .send(&service)
+            .await
+            .take_string()
+            .await
+            .expect("response body");
+        assert_eq!(content, "added");
+    }
+
+    #[tokio::test]
+    async fn replacing_public_router_refreshes_compiled_plan() {
+        #[handler]
+        async fn first() -> &'static str {
+            "first"
+        }
+        #[handler]
+        async fn second() -> &'static str {
+            "second"
+        }
+
+        let mut service = Service::new(Router::with_path("first").goal(first));
+        let first_body = TestClient::get("http://127.0.0.1/first")
+            .send(&service)
+            .await
+            .take_string()
+            .await
+            .expect("first response body");
+        assert_eq!(first_body, "first");
+
+        service.router = Arc::new(Router::with_path("second").goal(second));
+        let second_body = TestClient::get("http://127.0.0.1/second")
+            .send(&service)
+            .await
+            .take_string()
+            .await
+            .expect("second response body");
+        assert_eq!(second_body, "second");
     }
 
     #[tokio::test]

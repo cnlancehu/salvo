@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
-//! Benchmarks for the routing hot path: `Router::detect`.
+//! Benchmarks for the routing hot path: `Router::detect` and
+//! `CompiledRouter::detect`.
 //!
 //! Scenarios cover the shapes that stress different parts of the matcher:
 //! flat static routes, dynamic params, deep nesting, wide sibling fan-out
@@ -9,7 +10,7 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use salvo_core::routing::PathState;
+use salvo_core::routing::{CompiledRouter, PathState};
 use salvo_core::test::TestClient;
 use salvo_core::{Router, handler};
 
@@ -18,16 +19,29 @@ async fn goal() -> &'static str {
     "ok"
 }
 
-fn bench_detect(c: &mut Criterion, name: &str, router: &Router, url: &str) {
+fn bench_detect(c: &mut Criterion, name: &str, router: Router, url: &str) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("build runtime");
-    let mut req = TestClient::get(url).build();
-    let path = req.uri().path().to_owned();
-    c.bench_function(name, |b| {
+    let compiled = CompiledRouter::new(router);
+    let mut source_req = TestClient::get(url).build();
+    let mut compiled_req = TestClient::get(url).build();
+    let path = source_req.uri().path().to_owned();
+    let source_name = format!("router/{name}");
+    let compiled_name = format!("compiled/{name}");
+
+    c.bench_function(&source_name, |b| {
         b.iter(|| {
             let mut state = PathState::from_borrowed_path(&path);
-            let matched = rt.block_on(router.detect(&mut req, &mut state));
+            let matched = rt.block_on(compiled.router().detect(&mut source_req, &mut state));
+            assert!(matched.is_some(), "route must match in benchmark");
+            black_box(state);
+        });
+    });
+    c.bench_function(&compiled_name, |b| {
+        b.iter(|| {
+            let mut state = PathState::from_borrowed_path(&path);
+            let matched = rt.block_on(compiled.detect(&mut compiled_req, &mut state));
             assert!(matched.is_some(), "route must match in benchmark");
             black_box(state);
         });
@@ -39,7 +53,7 @@ fn static_shallow(c: &mut Criterion) {
         .push(Router::with_path("users").goal(goal))
         .push(Router::with_path("articles").goal(goal))
         .push(Router::with_path("health").goal(goal));
-    bench_detect(c, "detect/static_shallow", &router, "http://t.dev/health");
+    bench_detect(c, "static_shallow", router, "http://t.dev/health");
 }
 
 fn dynamic_params(c: &mut Criterion) {
@@ -51,8 +65,8 @@ fn dynamic_params(c: &mut Criterion) {
     );
     bench_detect(
         c,
-        "detect/dynamic_params",
-        &router,
+        "dynamic_params",
+        router,
         "http://t.dev/users/12345/articles/67890",
     );
 }
@@ -71,34 +85,36 @@ fn deep_tree(c: &mut Criterion) {
     let router = Router::new().push(leaf);
     bench_detect(
         c,
-        "detect/deep_tree",
-        &router,
+        "deep_tree",
+        router,
         "http://t.dev/level0/v1/level2/v3/level4/v5/level6/v7/leaf",
     );
 }
 
 fn wide_siblings(c: &mut Criterion) {
-    // 100 sibling routes under one parent; the request matches the last one,
-    // which is the worst case for the linear sibling scan.
-    let mut parent = Router::with_path("api");
-    for i in 0..100 {
-        parent = parent.push(Router::with_path(format!("res{i:03}")).goal(goal));
+    // Requests match the last sibling, stressing the linear scan and showing
+    // where compiled static dispatch starts paying for its hash lookup.
+    for count in [8, 16, 100] {
+        let mut parent = Router::with_path("api");
+        for index in 0..count {
+            parent = parent.push(Router::with_path(format!("res{index:03}")).goal(goal));
+        }
+        let router = Router::new().push(parent);
+        bench_detect(
+            c,
+            &format!("wide_siblings_{count}_last"),
+            router,
+            &format!("http://t.dev/api/res{:03}", count - 1),
+        );
     }
-    let router = Router::new().push(parent);
-    bench_detect(
-        c,
-        "detect/wide_siblings_last",
-        &router,
-        "http://t.dev/api/res099",
-    );
 }
 
 fn wildcard_tail(c: &mut Criterion) {
     let router = Router::new().push(Router::with_path("assets/{**rest}").goal(goal));
     bench_detect(
         c,
-        "detect/wildcard_tail",
-        &router,
+        "wildcard_tail",
+        router,
         "http://t.dev/assets/css/site/theme/main.css",
     );
 }
@@ -114,8 +130,8 @@ fn sibling_param_backtrack(c: &mut Criterion) {
     );
     bench_detect(
         c,
-        "detect/sibling_param_backtrack",
-        &router,
+        "sibling_param_backtrack",
+        router,
         "http://t.dev/users/alice",
     );
 }

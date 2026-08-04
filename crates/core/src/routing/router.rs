@@ -2,6 +2,8 @@ use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use http::Extensions;
+
 use super::filters::{self, FnFilter, PathFilter};
 use super::{DetectMatched, Filter, FilterInfo, PathState};
 use crate::handler::{Handler, WhenHoop};
@@ -23,6 +25,10 @@ pub struct Router {
     pub hoops: Vec<Arc<dyn Handler>>,
     /// The final handler to handle request of current router.
     pub goal: Option<Arc<dyn Handler>>,
+    /// Type map for metadata attached by integrations such as `salvo-oapi`.
+    ///
+    /// Extensions are construction-time data and are not consulted by the routing hot path.
+    extensions: Extensions,
 }
 
 struct DetectFrame<'a> {
@@ -74,7 +80,21 @@ impl Router {
             filters: Vec::new(),
             hoops: Vec::new(),
             goal: None,
+            extensions: Extensions::new(),
         }
+    }
+
+    /// Returns metadata extensions attached to this router node.
+    #[inline]
+    #[must_use]
+    pub fn extensions(&self) -> &Extensions {
+        &self.extensions
+    }
+
+    /// Returns mutable metadata extensions attached to this router node.
+    #[inline]
+    pub fn extensions_mut(&mut self) -> &mut Extensions {
+        &mut self.extensions
     }
 
     /// Get current router's children reference.
@@ -171,7 +191,12 @@ impl Router {
 
     async fn filters_match(&self, req: &mut Request, path_state: &mut PathState<'_>) -> bool {
         for filter in &self.filters {
-            if !filter.filter(req, path_state).await {
+            let matched = if filter.is_sync() {
+                filter.filter_sync(req, path_state)
+            } else {
+                filter.filter(req, path_state).await
+            };
+            if !matched {
                 return false;
             }
         }

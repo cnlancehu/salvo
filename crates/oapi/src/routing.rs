@@ -1,6 +1,5 @@
 use std::any::TypeId;
-use std::collections::{BTreeSet, HashMap};
-use std::sync::{LazyLock, RwLock};
+use std::collections::BTreeSet;
 
 use salvo_core::Router;
 use salvo_core::http::Method;
@@ -54,18 +53,17 @@ fn normalize_oapi_path(path: &str) -> String {
             let Some(content) = path.get(content_start..param_end) else {
                 break;
             };
-            if let Some(name_end) = content.find([':', '|']) {
-                normalized.push('{');
-                let Some(name) = content.get(..name_end) else {
-                    break;
-                };
-                normalized.push_str(name);
-                normalized.push('}');
-            } else {
-                normalized.push('{');
-                normalized.push_str(content);
-                normalized.push('}');
-            }
+            let name_end = content.find([':', '|']).unwrap_or(content.len());
+            let Some(name) = content.get(..name_end) else {
+                break;
+            };
+            let name = ["*+", "*?", "**", "*"]
+                .into_iter()
+                .find_map(|prefix| name.strip_prefix(prefix))
+                .unwrap_or(name);
+            normalized.push('{');
+            normalized.push_str(name);
+            normalized.push('}');
         } else {
             if let Some(rest) = path.get(start..) {
                 normalized.push_str(rest);
@@ -78,7 +76,6 @@ fn normalize_oapi_path(path: &str) -> String {
 
 #[derive(Debug, Default)]
 pub(crate) struct NormNode {
-    // pub(crate) router_id: usize,
     pub(crate) handler_type_id: Option<TypeId>,
     pub(crate) handler_type_name: Option<&'static str>,
     pub(crate) method: Option<PathItemType>,
@@ -87,27 +84,19 @@ pub(crate) struct NormNode {
     pub(crate) metadata: Metadata,
 }
 
-impl NormNode {
-    pub(crate) fn new(router: &Router, inherited_metadata: Metadata) -> Self {
-        let mut node = Self {
-            // router_id: router.id,
-            metadata: inherited_metadata,
-            ..Self::default()
-        };
-        let registry = METADATA_REGISTRY
-            .read()
-            .expect("failed to lock METADATA_REGISTRY for read");
-        if let Some(metadata) = registry.get(&router.id) {
-            node.metadata.tags.extend(metadata.tags.iter().cloned());
-            node.metadata
-                .securities
-                .extend(metadata.securities.iter().cloned());
-        }
+#[derive(Debug, Default)]
+struct RouteFilterMetadata {
+    path: Option<String>,
+    method: Option<PathItemType>,
+}
 
+impl RouteFilterMetadata {
+    fn collect(router: &Router) -> Self {
+        let mut metadata = Self::default();
         for filter in router.filters() {
             match filter.info() {
                 FilterInfo::Path(path) => {
-                    node.path = Some(normalize_oapi_path(&path));
+                    metadata.path = Some(normalize_oapi_path(&path));
                 }
                 FilterInfo::Method(method) => {
                     // Only overwrite when the method maps to a known
@@ -132,7 +121,7 @@ impl NormNode {
                         _ => None,
                     };
                     if item.is_some() {
-                        node.method = item;
+                        metadata.method = item;
                     } else if method == Method::CONNECT {
                         tracing::warn!(
                             "HTTP CONNECT has no OpenAPI 3.1 mapping; the route will be \
@@ -145,6 +134,26 @@ impl NormNode {
                 _ => {}
             }
         }
+        metadata
+    }
+}
+
+impl NormNode {
+    pub(crate) fn new(router: &Router, inherited_metadata: Metadata) -> Self {
+        let route = RouteFilterMetadata::collect(router);
+        let mut node = NormNode {
+            path: route.path,
+            method: route.method,
+            metadata: inherited_metadata,
+            ..NormNode::default()
+        };
+        if let Some(metadata) = router.extensions().get::<Metadata>() {
+            node.metadata.tags.extend(metadata.tags.iter().cloned());
+            node.metadata
+                .securities
+                .extend(metadata.securities.iter().cloned());
+        }
+
         node.handler_type_id = router.goal.as_ref().map(|h| h.type_id());
         node.handler_type_name = router.goal.as_ref().map(|h| h.type_name());
         let routers = router.routers();
@@ -156,10 +165,6 @@ impl NormNode {
         node
     }
 }
-
-/// A component for save router metadata.
-type MetadataMap = RwLock<HashMap<usize, Metadata>>;
-static METADATA_REGISTRY: LazyLock<MetadataMap> = LazyLock::new(MetadataMap::default);
 
 /// Router extension trait for openapi metadata.
 pub trait RouterExt {
@@ -194,42 +199,30 @@ pub trait RouterExt {
 }
 
 impl RouterExt for Router {
-    fn oapi_security(self, security: SecurityRequirement) -> Self {
-        let mut guard = METADATA_REGISTRY
-            .write()
-            .expect("failed to lock METADATA_REGISTRY for write");
-        let metadata = guard.entry(self.id).or_default();
+    fn oapi_security(mut self, security: SecurityRequirement) -> Self {
+        let metadata = self.extensions_mut().get_or_insert_default::<Metadata>();
         metadata.securities.push(security);
         self
     }
-    fn oapi_securities<I>(self, iter: I) -> Self
+    fn oapi_securities<I>(mut self, iter: I) -> Self
     where
         I: IntoIterator<Item = SecurityRequirement>,
     {
-        let mut guard = METADATA_REGISTRY
-            .write()
-            .expect("failed to lock METADATA_REGISTRY for write");
-        let metadata = guard.entry(self.id).or_default();
+        let metadata = self.extensions_mut().get_or_insert_default::<Metadata>();
         metadata.securities.extend(iter);
         self
     }
-    fn oapi_tag(self, tag: impl Into<String>) -> Self {
-        let mut guard = METADATA_REGISTRY
-            .write()
-            .expect("failed to lock METADATA_REGISTRY for write");
-        let metadata = guard.entry(self.id).or_default();
+    fn oapi_tag(mut self, tag: impl Into<String>) -> Self {
+        let metadata = self.extensions_mut().get_or_insert_default::<Metadata>();
         metadata.tags.insert(tag.into());
         self
     }
-    fn oapi_tags<I, V>(self, iter: I) -> Self
+    fn oapi_tags<I, V>(mut self, iter: I) -> Self
     where
         I: IntoIterator<Item = V>,
         V: Into<String>,
     {
-        let mut guard = METADATA_REGISTRY
-            .write()
-            .expect("failed to lock METADATA_REGISTRY for write");
-        let metadata = guard.entry(self.id).or_default();
+        let metadata = self.extensions_mut().get_or_insert_default::<Metadata>();
         metadata.tags.extend(iter.into_iter().map(Into::into));
         self
     }
@@ -244,7 +237,14 @@ pub(crate) struct Metadata {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_oapi_path;
+    use salvo_core::routing::{Filter, filters};
+    use salvo_core::{Router, handler};
+
+    use super::{Metadata, NormNode, RouterExt, normalize_oapi_path};
+    use crate::{PathItemType, SecurityRequirement};
+
+    #[handler]
+    async fn test_handler() {}
 
     #[test]
     fn normalize_braced_path_constraints() {
@@ -259,6 +259,88 @@ mod tests {
         assert_eq!(
             normalize_oapi_path("/posts/article_{id:num}"),
             "/posts/article_{id}"
+        );
+    }
+
+    #[test]
+    fn normalize_complex_path_parameters() {
+        assert_eq!(
+            normalize_oapi_path(r"/files/{name|[a-z]{2,4}}.{ext}"),
+            "/files/{name}.{ext}"
+        );
+        assert_eq!(
+            normalize_oapi_path(r"/posts/{id:num(3..=10)}/article_{slug|[a-z]{2}}"),
+            "/posts/{id}/article_{slug}"
+        );
+        assert_eq!(normalize_oapi_path(r"/items/{id|foo\}bar}"), "/items/{id}");
+        assert_eq!(normalize_oapi_path("/archive/{**rest}"), "/archive/{rest}");
+        assert_eq!(normalize_oapi_path("/archive/{*+rest}"), "/archive/{rest}");
+        assert_eq!(normalize_oapi_path("/archive/{*?rest}"), "/archive/{rest}");
+    }
+
+    #[test]
+    fn norm_tree_collects_common_path_and_method_builders() {
+        let router = Router::with_path("/users/{id:num}")
+            .get(test_handler)
+            .post(test_handler);
+
+        let node = NormNode::new(&router, Metadata::default());
+
+        assert_eq!(node.path.as_deref(), Some("/users/{id}"));
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.children[0].method, Some(PathItemType::Get));
+        assert_eq!(node.children[1].method, Some(PathItemType::Post));
+        assert!(node.children.iter().all(|child| child.path.is_none()));
+    }
+
+    #[test]
+    fn composite_filters_remain_opaque_without_core_metadata() {
+        let router = Router::new()
+            .filter(filters::path("/combined").and(filters::get()))
+            .goal(test_handler);
+
+        let node = NormNode::new(&router, Metadata::default());
+
+        assert!(node.path.is_none());
+        assert!(node.method.is_none());
+        assert!(node.handler_type_id.is_some());
+    }
+
+    #[test]
+    fn router_extensions_store_and_inherit_oapi_metadata() {
+        let security = SecurityRequirement::new("oauth", ["read"]);
+        let router = Router::new()
+            .oapi_tag("root")
+            .oapi_security(security.clone())
+            .push(Router::new().oapi_tags(["child", "root"]))
+            .push(Router::new());
+
+        let attached = router
+            .extensions()
+            .get::<Metadata>()
+            .expect("metadata should be stored on the router");
+        assert_eq!(attached.tags.iter().collect::<Vec<_>>(), ["root"]);
+        assert_eq!(
+            attached.securities.as_slice(),
+            std::slice::from_ref(&security)
+        );
+
+        let node = NormNode::new(&router, Metadata::default());
+        assert_eq!(
+            node.children[0].metadata.tags.iter().collect::<Vec<_>>(),
+            ["child", "root"]
+        );
+        assert_eq!(
+            node.children[0].metadata.securities.as_slice(),
+            std::slice::from_ref(&security)
+        );
+        assert_eq!(
+            node.children[1].metadata.tags.iter().collect::<Vec<_>>(),
+            ["root"]
+        );
+        assert_eq!(
+            node.children[1].metadata.securities.as_slice(),
+            std::slice::from_ref(&security)
         );
     }
 }

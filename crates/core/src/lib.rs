@@ -76,7 +76,7 @@ pub use self::error::{BoxedError, Error};
 pub use self::extract::Extractible;
 pub use self::handler::Handler;
 pub use self::http::{Request, Response};
-pub use self::routing::{FlowCtrl, Router};
+pub use self::routing::{CompiledRouter, FlowCtrl, Router};
 pub use self::service::Service;
 pub use self::writing::{Scribe, Writer};
 /// Result type which has `salvo::Error` as its error type.
@@ -111,7 +111,7 @@ pub mod prelude {
     }
     pub use crate::conn::{ConnCtrl, JoinedListener, Listener, TcpListener};
     pub use crate::handler::{self, Handler};
-    pub use crate::routing::{FlowCtrl, Router};
+    pub use crate::routing::{CompiledRouter, FlowCtrl, Router};
     cfg_feature! {
         #![feature = "server"]
         pub use crate::server::Server;

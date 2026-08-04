@@ -18,10 +18,31 @@ where
 {
     #[inline]
     async fn filter(&self, req: &mut Request, state: &mut PathState<'_>) -> bool {
-        if self.first.filter(req, state).await {
+        let first = if self.first.is_sync() {
+            self.first.filter_sync(req, state)
+        } else {
+            self.first.filter(req, state).await
+        };
+        if first {
             true
+        } else if self.second.is_sync() {
+            self.second.filter_sync(req, state)
         } else {
             self.second.filter(req, state).await
+        }
+    }
+
+    #[inline]
+    fn is_sync(&self) -> bool {
+        self.first.is_sync() && self.second.is_sync()
+    }
+
+    #[inline]
+    fn filter_sync(&self, req: &mut Request, state: &mut PathState<'_>) -> bool {
+        if self.first.filter_sync(req, state) {
+            true
+        } else {
+            self.second.filter_sync(req, state)
         }
     }
 }
@@ -39,7 +60,26 @@ where
 {
     #[inline]
     async fn filter(&self, req: &mut Request, state: &mut PathState<'_>) -> bool {
-        if self.filter.filter(req, state).await {
+        let matched = if self.filter.is_sync() {
+            self.filter.filter_sync(req, state)
+        } else {
+            self.filter.filter(req, state).await
+        };
+        if matched {
+            true
+        } else {
+            (self.callback)(req, state)
+        }
+    }
+
+    #[inline]
+    fn is_sync(&self) -> bool {
+        self.filter.is_sync()
+    }
+
+    #[inline]
+    fn filter_sync(&self, req: &mut Request, state: &mut PathState<'_>) -> bool {
+        if self.filter.filter_sync(req, state) {
             true
         } else {
             (self.callback)(req, state)
@@ -67,10 +107,36 @@ where
 {
     #[inline]
     async fn filter(&self, req: &mut Request, state: &mut PathState<'_>) -> bool {
-        if !self.first.filter(req, state).await {
+        let first = if self.first.is_sync() {
+            self.first.filter_sync(req, state)
+        } else {
+            self.first.filter(req, state).await
+        };
+        if !first {
             false
+        } else if self.second.is_sync() {
+            self.second.filter_sync(req, state)
         } else {
             self.second.filter(req, state).await
+        }
+    }
+
+    #[inline]
+    fn static_path_segment(&self) -> Option<&str> {
+        self.first.static_path_segment()
+    }
+
+    #[inline]
+    fn is_sync(&self) -> bool {
+        self.first.is_sync() && self.second.is_sync()
+    }
+
+    #[inline]
+    fn filter_sync(&self, req: &mut Request, state: &mut PathState<'_>) -> bool {
+        if !self.first.filter_sync(req, state) {
+            false
+        } else {
+            self.second.filter_sync(req, state)
         }
     }
 }
@@ -89,7 +155,31 @@ where
 {
     #[inline]
     async fn filter(&self, req: &mut Request, state: &mut PathState<'_>) -> bool {
-        if !self.filter.filter(req, state).await {
+        let matched = if self.filter.is_sync() {
+            self.filter.filter_sync(req, state)
+        } else {
+            self.filter.filter(req, state).await
+        };
+        if !matched {
+            false
+        } else {
+            (self.callback)(req, state)
+        }
+    }
+
+    #[inline]
+    fn static_path_segment(&self) -> Option<&str> {
+        self.filter.static_path_segment()
+    }
+
+    #[inline]
+    fn is_sync(&self) -> bool {
+        self.filter.is_sync()
+    }
+
+    #[inline]
+    fn filter_sync(&self, req: &mut Request, state: &mut PathState<'_>) -> bool {
+        if !self.filter.filter_sync(req, state) {
             false
         } else {
             (self.callback)(req, state)
