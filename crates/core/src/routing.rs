@@ -401,6 +401,8 @@
 
 pub mod filters;
 pub use filters::*;
+mod compiled_router;
+pub use compiled_router::CompiledRouter;
 mod router;
 pub use router::Router;
 
