@@ -1029,10 +1029,21 @@ impl PathParser {
     }
 }
 
+#[inline]
+fn first_static_path_segment(raw_value: &str) -> Option<String> {
+    let segment = raw_value.trim_start_matches('/').split('/').next()?;
+    if segment.is_empty() || segment.contains(['{', '}']) {
+        None
+    } else {
+        Some(segment.to_owned())
+    }
+}
+
 /// Filter requests by their path information.
 pub struct PathFilter {
     raw_value: String,
     path_wisps: Vec<WispKind>,
+    static_path_segment: Option<String>,
 }
 
 impl Debug for PathFilter {
@@ -1060,12 +1071,7 @@ impl Filter for PathFilter {
     }
     #[inline]
     fn static_path_segment(&self) -> Option<&str> {
-        let segment = self.raw_value.trim_start_matches('/').split('/').next()?;
-        if segment.is_empty() || segment.contains(['{', '}']) {
-            None
-        } else {
-            Some(segment)
-        }
+        self.static_path_segment.as_deref()
     }
 }
 impl PathFilter {
@@ -1083,9 +1089,11 @@ impl PathFilter {
                 return Err(format!("{e}, raw_value: {raw_value}"));
             }
         };
+        let static_path_segment = first_static_path_segment(&raw_value);
         Ok(Self {
             raw_value,
             path_wisps,
+            static_path_segment,
         })
     }
 
@@ -1093,6 +1101,7 @@ impl PathFilter {
     fn invalid(raw_value: String) -> Self {
         Self {
             raw_value,
+            static_path_segment: None,
             path_wisps: vec![
                 RegexWisp {
                     name: "__salvo_invalid_path_filter".into(),
